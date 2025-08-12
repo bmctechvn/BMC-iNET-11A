@@ -68,7 +68,21 @@ def calculate_file_md5(filepath: str) -> str:
     except FileNotFoundError:
         DIODE_LOGGER.error(f"File not found for MD5 calculation: {filepath}")
         return None
-
+        
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transfer_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            filename TEXT NOT NULL,
+            filesize INTEGER,
+            status TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 # ==============================================================================
 # 3. LUỒNG NHẬN MẠNG (PRODUCER)
 # ==============================================================================
@@ -82,7 +96,7 @@ class NetworkThread(mp.Process):
         self.running = mp.Value('b', True) # Dùng biến chia sẻ để dừng
 
     def run(self):
-        DIODE_LOGGER.info("NetworkThread started. Listening for packets...")
+        DIODE_LOGGER.info("NetworkProcess started. Listening for packets...")
         packets_dropped = 0
         while self.running.value:
             try:
@@ -98,7 +112,7 @@ class NetworkThread(mp.Process):
             except socket.timeout:
                 continue
             except Exception as e:
-                DIODE_LOGGER.error(f"NetworkThread error: {e}")
+                DIODE_LOGGER.error(f"NetworkProcess error: {e}")
 
     def stop(self):
         self.running = False
@@ -118,7 +132,7 @@ class DiskWriterThread(mp.Process):
         self.current_transfer = None  # Quản lý trạng thái bên trong luồng, không dùng biến toàn cục
 
     def run(self):
-        DIODE_LOGGER.info("DiskWriterThread started. Waiting for data...")
+        DIODE_LOGGER.info("DiskWriterProcess started. Waiting for data...")
         while self.running:
             try:
                 data = self.data_queue.get(timeout=1)
@@ -126,7 +140,7 @@ class DiskWriterThread(mp.Process):
             except queue.Empty:
                 continue
             except Exception as e:
-                DIODE_LOGGER.error(f"DiskWriterThread error: {e}")
+                DIODE_LOGGER.error(f"DiskWriterProcess error: {e}")
                 traceback.print_exc()
                 self._reset_transfer()
 
@@ -181,14 +195,13 @@ class DiskWriterThread(mp.Process):
             header = data[:HEADER_SIZE]
             payload_data = data[HEADER_SIZE:]
             _, path_hash_bytes, count = struct.unpack(HEADER_FORMAT, header)
-
-            if path_hash_bytes.hex() == self.current_transfer.file_md5:
-                if self.current_transfer.file_handle:
-                    self.current_transfer.file_handle.write(payload_data)
-                    self.current_transfer.known_chunks.add(count)
-                    self.current_transfer.bytes_transferred += len(payload_data)
-            else:
-                DIODE_LOGGER.warning("Data packet with mismatched MD5 received. Ignoring.")
+            #if path_hash_bytes.hex() == self.current_transfer.file_md5:
+            if self.current_transfer.file_handle:
+                self.current_transfer.file_handle.write(payload_data)
+                self.current_transfer.known_chunks.add(count)
+                self.current_transfer.bytes_transferred += len(payload_data)
+            #else:
+            #    DIODE_LOGGER.warning("Data packet with mismatched MD5 received. Ignoring.")
         except struct.error:
             DIODE_LOGGER.warning("Malformed binary packet received. Ignoring.")
 
@@ -260,20 +273,7 @@ class DiskWriterThread(mp.Process):
             conn.close()
         except Exception as e:
             DIODE_LOGGER.error(f"Failed to log transfer to DB: {e}")
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS transfer_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            filename TEXT NOT NULL,
-            filesize INTEGER,
-            status TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+
 # ==============================================================================
 # 5. HÀM MAIN ĐỂ KHỞI TẠO VÀ CHẠY
 # ==============================================================================
