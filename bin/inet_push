@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+    Đẩy dữ liệu đã hoàn thành sang Server cuối cùng
+"""
 import configparser
 import logging
 import os

@@ -1,0 +1,6 @@
+# Thư viện để xử lý kết nối SFTP/SSH trong Python
+paramiko>=2.11.0
+
+# Thư viện để theo dõi sự kiện của hệ thống file (file changes) trên Linux
+# Dùng cho các script tự động phát hiện file mới.
+inotify==0.2.10

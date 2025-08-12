@@ -44,8 +44,8 @@ Mạng Low-Side (Kém an toàn)                      Mạng High-Side (An toàn)
 Clone dự án này về cả hai máy TX và RX.
 
 ```bash
-git clone https://github.com/bmctechvn/bmc-inet-11a.git
-cd bmc-inet-11a
+git clone https://github.com/bmctechvn/BMC-iNET-11A.git
+cd BMC-iNET-11A
 ```
 
 Trên cả hai máy, cài đặt các thư viện Python cần thiết:
@@ -53,8 +53,6 @@ Trên cả hai máy, cài đặt các thư viện Python cần thiết:
 sudo apt update
 sudo pip3 install -r requirements.txt
 ```
-*(Bạn nên tạo một file `requirements.txt` với nội dung `paramiko` và `inotify`).*
-
 ### 2. Cấu hình Máy TX Proxy (Bên Gửi)
 
 Máy TX Proxy là nơi tiếp nhận file từ người dùng.
@@ -178,6 +176,39 @@ sudo journalctl -u diode-receive.service -f
 3.  **Tinh chỉnh `DELAY_NEXT_CHUNK` (Trên máy TX):**
     Trong file `inet_send`, giảm dần giá trị `DELAY_NEXT_CHUNK` để tìm ra tốc độ cao nhất mà hệ thống vẫn chạy ổn định.
 
+
+### Cài đặt các Gói Hệ thống (APT Dependencies)
+
+Trước khi chạy các script Python, bạn cần đảm bảo các gói phần mềm hệ thống cần thiết đã được cài đặt thông qua `apt`.
+
+#### **Trên cả hai máy (TX và RX Proxy):**
+Các công cụ này cần thiết cho việc cài đặt thư viện Python, kiểm tra và tối ưu hiệu năng mạng.
+```bash
+sudo apt update
+sudo apt install -y python3-pip ethtool iperf3
+```
+
+#### **Trên máy TX Proxy (Bên Gửi):**
+Cài đặt các dịch vụ server để tiếp nhận file từ người dùng cuối.
+```bash
+# Cài đặt dịch vụ SFTP (tích hợp sẵn) và FTPS
+sudo apt install -y openssh-server vsftpd
+```
+*Lưu ý: Nếu bạn cần hỗ trợ chia sẻ file cho máy Windows (giao thức SMB/CIFS), hãy cài đặt thêm `samba`.*
+```bash
+# sudo apt install -y samba
+```
+
+#### **Trên máy RX Proxy (đến Server cuối):**
+Cài đặt `rsync` để script `sync_and_clear.py` có thể đồng bộ hóa dữ liệu.
+```bash
+sudo apt install -y rsync
+```
+*Lưu ý: `sshpass` chỉ cần thiết nếu bạn bắt buộc phải dùng mật khẩu thay cho SSH key. Việc này không được khuyến nghị vì lý do bảo mật.*
+```bash
+# CẢNH BÁO: CHỈ CÀI ĐẶT KHI CẦN THIẾT
+# sudo apt install -y sshpass
+```
 ---
 ## 📄 License
 

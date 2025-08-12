@@ -1,0 +1,15 @@
+[Unit]
+Description=BMC iNET push to Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bmc
+WorkingDirectory=/home/bmc/core/data-diode/
+ExecStart=/home/bmc/core/data-diode/bin/push_server
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
