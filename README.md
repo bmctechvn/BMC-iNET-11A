@@ -306,6 +306,351 @@ Nếu không có `ssh-copy-id`, hãy làm thủ công:
     ssh -i ~/.ssh/rx_to_server_key user@<IP_SERVER_CUOI> "echo 'Kết nối SSH Key thành công!'"
     ```
     Nếu bạn thấy thông báo "Kết nối SSH Key thành công!" mà **không cần nhập mật khẩu**, nghĩa là bạn đã thiết lập thành công. Dịch vụ `rsync` của bạn giờ đã sẵn sàng để hoạt động tự động.
+
+## 6. 윈도우 Cấu hình Chia sẻ File cho Windows (Samba)
+
+Để cho phép người dùng từ máy tính Windows dễ dàng gửi file vào Data Diode, bạn có thể thiết lập một thư mục chia sẻ trên máy **TX Proxy** bằng dịch vụ Samba.
+
+### 6.1. Cài đặt Samba và Cấu hình Tường lửa
+
+1.  **Cài đặt Samba:**
+    ```bash
+    sudo apt update
+    sudo apt install -y samba
+    ```
+
+2.  **Cho phép Samba qua tường lửa UFW:**
+    ```bash
+    sudo ufw allow 'Samba'
+    sudo ufw reload
+    ```
+
+### 6.2. Tạo User và Thư mục Chia sẻ
+
+1.  **Tạo thư mục chia sẻ:**
+    Chúng ta sẽ dùng một thư mục riêng để đảm bảo an toàn.
+    ```bash
+    sudo mkdir -p /srv/samba/diode_upload
+    ```
+
+2.  **Tạo người dùng Linux:**
+    Tạo một user mới (`smbuser`) và không cấp cho họ quyền đăng nhập shell để tăng bảo mật.
+    ```bash
+    sudo adduser --no-create-home --shell /usr/sbin/nologin smbuser
+    ```
+
+3.  **Cấp quyền thư mục:**
+    ```bash
+    sudo chown smbuser:smbuser /srv/samba/diode_upload
+    sudo chmod 755 /srv/samba/diode_upload
+    ```
+
+4.  **Đặt mật khẩu Samba (Quan trọng):**
+    Người dùng sẽ sử dụng mật khẩu này để truy cập thư mục chia sẻ.
+    ```bash
+    sudo smbpasswd -a smbuser
+    ```
+    Hệ thống sẽ yêu cầu bạn nhập và xác nhận mật khẩu mới.
+
+### 6.3. Chỉnh sửa File Cấu hình Samba
+
+1.  Mở file `/etc/samba/smb.conf`:
+    ```bash
+    sudo nano /etc/samba/smb.conf
+    ```
+
+2.  Thêm khối cấu hình sau vào cuối file:
+    ```ini
+    [diode_upload]
+       comment = Data Diode Upload Share
+       path = /srv/samba/diode_upload
+       browsable = yes
+       guest ok = no
+       read only = no
+       writable = yes
+       valid users = smbuser
+    ```
+
+### 6.4. Tích hợp với Script và Khởi động lại
+
+1.  **Cập nhật Dịch vụ `diode-send`:**
+    Đảm bảo script `inet-send.py` đang theo dõi đúng thư mục mà Samba chia sẻ. Sửa file `/etc/systemd/system/diode-send.service` và cập nhật tham số `--directory`:
+
+    ```ini
+    [Service]
+    ...
+    ExecStart=/usr/bin/python3 /path/to/your/project/inet-send.py --directory /srv/samba/diode_upload --target-subnet ...
+    ...
+    ```
+
+2.  **Khởi động lại các dịch vụ:**
+    ```bash
+    # Tải lại cấu hình systemd nếu bạn vừa sửa file service
+    sudo systemctl daemon-reload
+
+    # Khởi động lại Samba
+    sudo systemctl restart smbd nmbd
+
+    # Khởi động lại dịch vụ gửi file của bạn
+    sudo systemctl restart diode-send.service
+    ```
+
+### 6.5. Kiểm tra Kết nối từ Windows
+
+1.  Mở **File Explorer** trên máy Windows.
+2.  Trên thanh địa chỉ, gõ `\\<IP_CUA_MAY_TX_PROXY>\diode_upload` (ví dụ: `\\10.10.2.2\diode_upload`).
+3.  Khi được hỏi, nhập tên người dùng là `smbuser` và mật khẩu bạn đã tạo.
+4.  Kéo-thả một file vào thư mục. File đó sẽ được script `inet-send.py` tự động phát hiện và gửi qua Data Diode.
+
+## 7. 🐧 Cấu hình Chia sẻ File cho Linux/Unix (NFS)
+
+Để cho phép các máy chủ Linux/Unix khác trong mạng nội bộ gửi file vào Data Diode, bạn có thể thiết lập một thư mục chia sẻ NFS (Network File System) trên máy **TX Proxy**.
+
+### 7.1. Cài đặt NFS Server
+
+1.  **Cài đặt gói cần thiết:**
+    ```bash
+    sudo apt update
+    sudo apt install -y nfs-kernel-server
+    ```
+
+2.  **Tạo thư mục chia sẻ:**
+    ```bash
+    sudo mkdir -p /srv/nfs/diode_upload
+    ```
+
+3.  **Cấp quyền cơ bản cho thư mục:**
+    ```bash
+    sudo chown nobody:nogroup /srv/nfs/diode_upload
+    sudo chmod 777 /srv/nfs/diode_upload
+    ```
+
+### 7.2. Định nghĩa Thư mục Chia sẻ (`/etc/exports`)
+
+Đây là nơi bạn quy định thư mục nào được chia sẻ và ai được phép truy cập.
+
+1.  Mở file `/etc/exports`:
+    ```bash
+    sudo nano /etc/exports
+    ```
+
+2.  Thêm dòng sau vào cuối file. Dòng này sẽ chia sẻ thư mục cho các máy client trong dải IP `10.10.1.0/24`.
+
+    ```
+    /srv/nfs/diode_upload    10.10.1.0/24(rw,sync,no_subtree_check)
+    ```
+    **Lưu ý quan trọng:** Hãy thay đổi `10.10.1.0/24` thành dải IP mạng của các máy client, hoặc một địa chỉ IP cụ thể để tăng cường bảo mật.
+
+3.  Áp dụng các thay đổi cấu hình:
+    ```bash
+    sudo exportfs -a
+    ```
+
+### 7.3. Cấu hình Tường lửa (UFW)
+
+Cho phép các client đã được định nghĩa ở trên kết nối đến dịch vụ NFS.
+```bash
+sudo ufw allow from 10.10.1.0/24 to any port nfs
+```
+*Hãy đảm bảo dải IP ở đây khớp với dải IP trong file `/etc/exports`.*
+
+### 7.4. Tích hợp và Khởi động lại
+
+1.  **Cập nhật Dịch vụ `diode-send`:**
+    Sửa file `/etc/systemd/system/diode-send.service` để script `inet-send.py` theo dõi đúng thư mục mà NFS chia sẻ.
+    ```ini
+    [Service]
+    ...
+    ExecStart=/usr/bin/python3 /path/to/project/inet-send.py --directory /srv/nfs/diode_upload --target-subnet ...
+    ...
+    ```
+
+2.  **Khởi động lại các dịch vụ:**
+    ```bash
+    # Tải lại cấu hình systemd nếu bạn vừa sửa file service
+    sudo systemctl daemon-reload
+
+    # Khởi động lại NFS Server
+    sudo systemctl restart nfs-kernel-server
+
+    # Khởi động lại dịch vụ gửi file của bạn
+    sudo systemctl restart diode-send.service
+    ```
+
+### 7.5. Kiểm tra từ Máy Client (Linux)
+
+1.  **Trên máy Client**, cài đặt gói NFS client:
+    ```bash
+    sudo apt update
+    sudo apt install -y nfs-common
+    ```
+
+2.  **Trên máy Client**, tạo một thư mục để mount:
+    ```bash
+    sudo mkdir -p /mnt/diode_share
+    ```
+
+3.  **Trên máy Client**, mount thư mục chia sẻ từ máy TX Proxy:
+    ```bash
+    # Thay <IP_TX_PROXY> bằng IP của máy TX Proxy
+    sudo mount <IP_TX_PROXY>:/srv/nfs/diode_upload /mnt/diode_share
+    ```
+
+4.  **Thực hiện kiểm tra:**
+    Copy một file vào thư mục vừa mount.
+    ```bash
+    cp /path/to/some/testfile.txt /mnt/diode_share/
+    ```
+    File sẽ được script `inet-send.py` tự động phát hiện, gửi đi và xóa khỏi thư mục nguồn.
+
+## 8. 📜 Cấu hình Chuyển tiếp Syslog (Syslog Forwarding)
+
+Tính năng này cho phép thu thập nhật ký (log) từ các thiết bị trong mạng an toàn và gửi một chiều đến một máy chủ giám sát tập trung (SIEM, Syslog Server) mà không tạo ra rủi ro cho mạng an toàn.
+
+Kiến trúc này sử dụng `socat` làm bộ chuyển tiếp UDP hiệu quả.
+
+```
+Mạng An toàn (OT)                                      Mạng Giám sát (IT)
++----------------+   +---------------+        +----------+        +---------------+   +-------------------+
+| Firewall, PLC, |   |               |        |          |        |               |   |                   |
+| Server, Switch +-->|   TX Proxy    +------->| Hardware +------->|   RX Proxy    +-->|  SIEM / Syslog    |
+| (Gửi Syslog)   |   | (socat)       |        |  Diode   |        | (socat)       |   |    Server         |
++----------------+   +---------------+        +----------+        +---------------+   +-------------------+
+```
+
+### 8.1. Cấu hình trên Máy TX Proxy
+
+Máy TX Proxy sẽ hoạt động như một điểm thu thập log trung gian.
+
+1.  **Tạo file dịch vụ** `/etc/systemd/system/diode-syslog-tx.service`:
+    ```ini
+    [Unit]
+    Description=Diode Syslog TX Forwarder (OT -> Diode)
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/bin/socat UDP4-LISTEN:514,fork UDP4-DATAGRAM:<IP_RX_PROXY>:514
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+    *Lưu ý: Thay thế `<IP_RX_PROXY>` bằng IP của máy RX Proxy.*
+
+2.  **Kích hoạt dịch vụ:**
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now diode-syslog-tx.service
+    ```
+
+### 8.2. Cấu hình trên Máy RX Proxy
+
+Máy RX Proxy sẽ nhận log từ Diode và gửi đến máy chủ cuối cùng.
+
+1.  **Tạo file dịch vụ** `/etc/systemd/system/diode-syslog-rx.service`:
+    ```ini
+    [Unit]
+    Description=Diode Syslog RX Forwarder (Diode -> SIEM)
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/bin/socat UDP4-LISTEN:514,fork UDP4-DATAGRAM:<IP_SYSLOG_SERVER>:514
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+    *Lưu ý: Thay thế `<IP_SYSLOG_SERVER>` bằng IP của máy chủ Log/SIEM của bạn.*
+
+2.  **Kích hoạt dịch vụ:**
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now diode-syslog-rx.service
+    ```
+
+### 8.3. Cấu hình Thiết bị Nguồn
+
+Bước cuối cùng là cấu hình tất cả các thiết bị mạng, máy chủ... trong mạng an toàn để gửi Syslog của chúng đến địa chỉ IP của máy TX Proxy trên cổng 514/UDP.
+## 9. 🕒 Cấu hình Đồng bộ Thời gian (NTP)
+
+Đồng bộ thời gian chính xác là yêu cầu tối quan trọng trong các hệ thống công nghiệp. Data Diode có thể được sử dụng để đồng bộ thời gian một cách an toàn từ một nguồn tin cậy ở mạng IT sang mạng an toàn OT.
+
+**Lưu ý quan trọng:** Luồng dữ liệu cho NTP sẽ đi theo hướng **IT -> Diode -> OT**, ngược lại với luồng dữ liệu chính của hệ thống. Điều này có thể yêu cầu một Diode vật lý thứ hai hoặc một kênh riêng biệt được cấu hình cho chiều ngược lại.
+
+Giao thức NTP tiêu chuẩn (hỏi-đáp) không hoạt động qua Diode. Thay vào đó, chúng ta sẽ sử dụng chế độ **NTP Broadcast** (phát quảng bá) một chiều.
+
+### 9.1. Kiến trúc hoạt động
+
+```
+Mạng IT (Có Internet/GPS)                                  Mạng An toàn (OT)
++-------------------+   +---------------+        +----------+        +---------------+   +-------------------+
+|                   |   |               |        |          |        |               |   |                   |
+|  NTP Server      +-->|   TX Proxy    +------->| Hardware +------->|   RX Proxy    +-->| Các thiết bị OT   |
+| (Broadcast Mode)  |   | (IT Side)     |        |  Diode   |        | (OT Side)     |   | (Lắng nghe bcast) |
+|                   |   |               |        | (IT->OT) |        |               |   |                   |
++-------------------+   +---------------+        +----------+        +---------------+   +-------------------+
+```
+
+### 9.2. Hướng dẫn Cài đặt (Sử dụng `chrony`)
+
+`chrony` là dịch vụ NTP mặc định trên các phiên bản Ubuntu mới.
+
+#### **a. Cấu hình NTP Server (Trên một máy chủ ở mạng IT)**
+
+Máy chủ này sẽ lấy thời gian chuẩn và phát quảng bá ra mạng.
+
+1.  **Cài đặt `chrony`:**
+    ```bash
+    sudo apt update
+    sudo apt install -y chrony
+    ```
+2.  **Chỉnh sửa file `/etc/chrony/chrony.conf`:**
+    ```ini
+    # Đồng bộ với các server internet (hoặc nguồn thời gian nội bộ khác)
+    pool pool.ntp.org iburst
+
+    # Cho phép các máy trong mạng IT truy vấn thời gian
+    allow 192.168.1.0/24 # <-- Thay bằng dải IP mạng IT của bạn
+
+    # Phát quảng bá các gói tin NTP ra toàn mạng
+    broadcast 255.255.255.255
+    ```
+3.  **Khởi động lại dịch vụ:**
+    ```bash
+    sudo systemctl restart chrony
+    ```
+
+#### **b. Cấu hình Diode Proxies (Chuyển tiếp NTP)**
+
+Hai máy Proxy cần chuyển tiếp các gói tin NTP (cổng UDP 123). Bạn có thể tạo các dịch vụ `systemd` đơn giản để chạy lệnh `socat` tương tự như đã làm với Syslog, nhưng cho cổng 123.
+
+* **TX Proxy (phía IT):** Cần nhận gói broadcast và gửi đến RX Proxy.
+* **RX Proxy (phía OT):** Cần nhận gói từ TX Proxy và phát broadcast ra mạng OT.
+
+#### **c. Cấu hình NTP Client (Trên các thiết bị mạng OT)**
+
+Tất cả các máy cần đồng bộ thời gian trong mạng OT sẽ được cấu hình làm client lắng nghe broadcast.
+
+1.  **Cài đặt `chrony`** trên các máy client.
+2.  **Chỉnh sửa file `/etc/chrony/chrony.conf`:**
+    * Xóa hoặc vô hiệu hóa tất cả các dòng `server` hoặc `pool` có sẵn.
+    * Thêm dòng duy nhất sau:
+    ```ini
+    broadcastclient
+    ```
+3.  **Khởi động lại dịch vụ:**
+    ```bash
+    sudo systemctl restart chrony
+    ```
+Sau khi hoàn tất, các thiết bị trong mạng OT sẽ tự động đồng bộ thời gian mà vẫn duy trì được sự cách ly an toàn khỏi mạng IT.
+
+
 ---
 ## 📄 License
 
