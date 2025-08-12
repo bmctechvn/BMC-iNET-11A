@@ -1,0 +1,14 @@
+[Unit]
+Description=Data Diode TX Proxy Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root # Hoặc user có quyền đọc thư mục nguồn và chạy script
+ExecStart=/usr/bin/python3 /path/to/your/project/inet_send --directory /path/to/source_dir --target-subnet 10.10.2.3 --target-port 9009
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

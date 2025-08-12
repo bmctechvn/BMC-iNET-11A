@@ -1,0 +1,14 @@
+[Unit]
+Description=Data Diode RX Proxy Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root # Hoặc user có quyền ghi vào các thư mục đích
+ExecStart=/usr/bin/python3 /path/to/your/project/inet_receive.py --directory /var/data/receiving --server-directory /home/bmc/done --bind-subnet 10.10.2.3 --bind-port 9009
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
