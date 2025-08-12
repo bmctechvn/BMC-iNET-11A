@@ -17,6 +17,7 @@ import queue
 import time
 # Dành cho kiến trúc song song thực!
 import multiprocessing as mp
+import sqlite3
 from logging import handlers
 
 # ==============================================================================
@@ -30,7 +31,7 @@ STDERR_FORMATTER = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s: %(
 STDERR_HANDLER = logging.StreamHandler(sys.stderr)
 STDERR_HANDLER.setFormatter(STDERR_FORMATTER)
 DIODE_LOGGER.addHandler(STDERR_HANDLER)
-
+DB_PATH = '/var/log/inet_receive_logs.db'
 # Hàng đợi (Queue) thread-safe để giao tiếp giữa 2 luồng
 DATA_QUEUE = mp.Queue(maxsize=200000)  # Tăng kích thước để có bộ đệm lớn hơn
 
@@ -196,15 +197,17 @@ class DiskWriterThread(mp.Process):
         #DIODE_LOGGER.info(f"Finished receiving {self.current_transfer.file_path}. Validating...")
         
         if self._is_file_valid(packet):
-            DIODE_LOGGER.info(f"File '{self.current_transfer.file_path}' is valid. Moving to outgoing queue.")
+            #DIODE_LOGGER.info(f"File '{self.current_transfer.file_path}' is valid. Moving to outgoing queue.")
             try:
                 dest_path = os.path.join(self.server_dir, self.current_transfer.file_path)
                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
                 shutil.move(self.current_transfer.full_path, dest_path)
+                self._log_transfer_to_db(self.current_transfer.file_path, self.current_transfer.file_size, "SUCCESS")
             except Exception as e:
                 DIODE_LOGGER.error(f"Could not move file to outgoing queue: {e}")
         else:
             DIODE_LOGGER.error(f"File '{self.current_transfer.file_path}' is invalid. Deleting.")
+            self._log_transfer_to_db(self.current_transfer.file_path, self.current_transfer.file_size, "FAILED")
             try:
                 os.remove(self.current_transfer.full_path)
             except OSError: pass
@@ -247,6 +250,30 @@ class DiskWriterThread(mp.Process):
     def stop(self):
         self.running = False
 
+    def _log_transfer_to_db(self, filename, filesize, status):
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO transfer_logs (filename, filesize, status) VALUES (?, ?, ?)",
+                        (filename, filesize, status))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            DIODE_LOGGER.error(f"Failed to log transfer to DB: {e}")
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS transfer_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            filename TEXT NOT NULL,
+            filesize INTEGER,
+            status TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 # ==============================================================================
 # 5. HÀM MAIN ĐỂ KHỞI TẠO VÀ CHẠY
 # ==============================================================================
@@ -264,7 +291,8 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((args.bind_subnet, args.bind_port))
     sock.settimeout(1.0) 
-
+    # Khởi tạo DB
+    init_db()
     # DÙNG MULTIPROCESSING QUEUE
     data_queue = mp.Queue(maxsize=200000)
 
@@ -272,12 +300,6 @@ def main():
     network_process = NetworkThread(sock, data_queue)
     disk_process = DiskWriterThread(data_queue, args.directory, args.server_directory)
     
-    #network_thread.daemon = True
-    #disk_thread.daemon = True
-    
-    #network_thread.start()
-    #disk_thread.start()
-
     processes = [network_process, disk_process]
     try:
         for p in processes:

@@ -12,6 +12,7 @@ import socket
 import time
 import sys
 import struct
+import sqlite3
 from logging import handlers
 
 # ==============================================================================
@@ -25,6 +26,7 @@ STDERR_FORMATTER = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s: %(
 STDERR_HANDLER = logging.StreamHandler(sys.stderr)
 STDERR_HANDLER.setFormatter(STDERR_FORMATTER)
 DIODE_LOGGER.addHandler(STDERR_HANDLER)
+DB_PATH = '/var/log/inet_send_logs.db'
 
 # Các hằng số của giao thức
 PKG_TYPE_START = 0
@@ -35,6 +37,50 @@ HEADER_FORMAT = '!B16sI' # Dùng cho gói DATA nhị phân
 # ==============================================================================
 # 2. CÁC HÀM TIỆN ÍCH
 # ==============================================================================
+def init_db():
+    """Khởi tạo database và bảng nếu chưa tồn tại."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS send_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                duration_seconds REAL,
+                filename TEXT NOT NULL,
+                filesize INTEGER,
+                status TEXT NOT NULL
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        os.chmod(DB_PATH, 0o666)
+    except Exception as e:
+        DIODE_LOGGER.error(f"Failed to initialize database: {e}")
+
+def log_transfer(filename: str, filesize: int, start_time: float, status: str):
+    """Ghi lại thông tin của một phiên truyền file đã hoàn tất."""
+    try:
+        end_time = time.time()
+        duration = end_time - start_time
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            # Cập nhật lại câu lệnh INSERT cho phù hợp với bảng mới
+            "INSERT INTO send_logs (timestamp, duration_seconds, filename, filesize, status) VALUES (?, ?, ?, ?, ?)",
+            (
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time)),
+                duration,
+                filename,
+                filesize,
+                status
+            )
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        DIODE_LOGGER.error(f"Failed to log transfer to DB: {e}")
 
 def calculate_file_md5(filepath: str) -> str:
     """Tính toán mã hash MD5 của một file."""
@@ -108,6 +154,9 @@ def send_file(sock, config, filepath: str):
     """
     rel_path = os.path.relpath(filepath, config['SOURCE_DIR'])
     DIODE_LOGGER.info(f"Processing file: {rel_path}")
+    # --- BƯỚC 1: Bắt đầu đo thời gian và ghi log START ---
+    start_time = time.time()
+    filesize = os.path.getsize(filepath)
 
     # Tính toán các thông số cần thiết
     file_md5 = calculate_file_md5(filepath)
@@ -137,6 +186,8 @@ def send_file(sock, config, filepath: str):
                 count += 1
     except Exception as e:
         DIODE_LOGGER.error(f"Error reading file {filepath} during transfer: {e}")
+        # Ghi log thất bại nếu có lỗi đọc file
+        log_transfer(rel_path, filesize, start_time, "FAILED_READ_ERROR")
         return # Hủy bỏ nếu không đọc được file
     
     # Gửi gói END
@@ -151,7 +202,11 @@ def send_file(sock, config, filepath: str):
         DIODE_LOGGER.info(f"Finished and removed source file: {rel_path}")
     except OSError as e:
         DIODE_LOGGER.error(f"Could not remove file {filepath}: {e}")
-
+        # Ghi log thất bại nếu không xóa được file
+        log_transfer(rel_path, filesize, start_time, "FAILED_DELETE_ERROR")
+    
+    # --- BƯỚC 2: Ghi log một lần duy nhất khi thành công ---
+    log_transfer(rel_path, filesize, start_time, "SUCCESS")
 # ==============================================================================
 # 5. HÀM MAIN ĐỂ KHỞI TẠO VÀ CHẠY
 # ==============================================================================
@@ -179,7 +234,8 @@ def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
     DIODE_LOGGER.info(f"Watching for new files in: {config['SOURCE_DIR']}")
-    
+    # Khởi tạo DB
+    init_db()
     try:
         while True:
             # Quét tìm file

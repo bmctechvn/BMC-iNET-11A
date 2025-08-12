@@ -163,6 +163,17 @@ sudo journalctl -u diode-receive.service -f
     # Lệnh tạm thời
     sudo ip link set <tên_card_mạng> mtu 9000
     # Cấu hình vĩnh viễn trong Netplan
+    sudo nano /etc/netplan/50-cloud-init.yaml
+    network:
+        version: 2
+        ethernets:
+            enp1s0:
+                dhcp4: true
+            enp2s0:
+                dhcp4: no
+                addresses:
+                    - 10.10.2.3/24
+                mtu: 9000
     ```
     Đảm bảo `CHUNK_SIZE` trong `inet_send` được đặt khoảng `8900`.
 
@@ -172,7 +183,8 @@ sudo journalctl -u diode-receive.service -f
     sudo sysctl -w net.core.rmem_default=26214400
     ```
     Thêm vào `/etc/sysctl.conf` để có hiệu lực vĩnh viễn.
-
+        net.core.rmem_max=26214400
+        net.core.rmem_default=26214400
 3.  **Tinh chỉnh `DELAY_NEXT_CHUNK` (Trên máy TX):**
     Trong file `inet_send`, giảm dần giá trị `DELAY_NEXT_CHUNK` để tìm ra tốc độ cao nhất mà hệ thống vẫn chạy ổn định.
 
@@ -209,6 +221,91 @@ sudo apt install -y rsync
 # CẢNH BÁO: CHỈ CÀI ĐẶT KHI CẦN THIẾT
 # sudo apt install -y sshpass
 ```
+## 5. 🔑 Cấu hình Xác thực không mật khẩu (SSH Key) cho Rsync
+
+Để script tự động đẩy dữ liệu từ **RX Proxy** sang **Server cuối** có thể hoạt động mà không cần can thiệp thủ công, bạn phải thiết lập xác thực bằng SSH key.
+
+Quy trình này bao gồm việc tạo một cặp key trên máy RX Proxy và cấp phép cho public key trên Server cuối.
+
+### 5.1. Trên máy RX Proxy (Nơi chạy script gửi)
+
+Bước này tạo ra một cặp khóa an toàn.
+
+1.  **Chạy lệnh `ssh-keygen`:**
+    Tạo một cặp key RSA 4096-bit mới. Đặt tên file key một cách gợi nhớ, ví dụ `rx_to_server_key`.
+
+    ```bash
+    ssh-keygen -t rsa -b 4096 -f ~/.ssh/rx_to_server_key -C "RX Proxy to Final Server rsync key"
+    ```
+
+2.  **Để trống Passphrase:**
+    Khi được hỏi `Enter passphrase (empty for no passphrase):`, hãy **nhấn Enter hai lần** để bỏ qua. Điều này là **bắt buộc** để script có thể sử dụng key mà không cần hỏi mật khẩu.
+
+Sau bước này, bạn sẽ có 2 file mới trong thư mục `~/.ssh/`:
+* `rx_to_server_key`: **Private Key** 🔒 (Khóa riêng tư, tuyệt đối bí mật).
+* `rx_to_server_key.pub`: **Public Key** 🌍 (Khóa công khai, dùng để chia sẻ).
+
+### 5.2. Trên Server Cuối (Nơi nhận dữ liệu)
+
+Bước này cấp phép cho Public Key của máy RX được phép kết nối.
+
+#### **Cách 1: Dùng `ssh-copy-id` (Khuyến nghị)**
+
+Đây là cách dễ dàng và an toàn nhất. Từ máy **RX Proxy**, chạy lệnh sau:
+
+```bash
+# Thay user và <IP_SERVER_CUOI> bằng thông tin của bạn
+ssh-copy-id -i ~/.ssh/rx_to_server_key.pub user@<IP_SERVER_CUOI>
+```
+Bạn sẽ được yêu cầu nhập mật khẩu của `user` trên Server cuối **một lần duy nhất**. Lệnh này sẽ tự động sao chép key và thiết lập quyền truy cập đúng.
+
+#### **Cách 2: Sao chép thủ công**
+
+Nếu không có `ssh-copy-id`, hãy làm thủ công:
+
+1.  **Trên máy RX Proxy**, lấy nội dung public key:
+    ```bash
+    cat ~/.ssh/rx_to_server_key.pub
+    ```
+    Sao chép toàn bộ chuỗi `ssh-rsa...` hiển thị ra.
+
+2.  **Đăng nhập vào Server cuối**.
+
+3.  Dán public key đã sao chép vào một dòng mới trong file `~/.ssh/authorized_keys`.
+    ```bash
+    # Tạo file và thư mục nếu chưa có
+    mkdir -p ~/.ssh
+    touch ~/.ssh/authorized_keys
+    
+    # Mở file và dán key vào
+    nano ~/.ssh/authorized_keys
+    ```
+
+4.  **Thiết lập quyền truy cập (Rất quan trọng):**
+    ```bash
+    chmod 700 ~/.ssh
+    chmod 600 ~/.ssh/authorized_keys
+    ```
+
+### 5.3. Cập nhật Cấu hình và Kiểm tra
+
+1.  **Cập nhật file cấu hình:**
+    Trên máy **RX Proxy**, mở file cấu hình (`uploader.ini` hoặc `.conf`) của script đẩy file và đảm bảo nó trỏ đến private key mới và đã xóa/vô hiệu hóa dòng mật khẩu.
+
+    ```ini
+    [SFTP]
+    User = user_remote
+    Host = <IP_SERVER_CUOI>
+    Ssh_Key_Path = /home/bmc/.ssh/rx_to_server_key
+    # Password = ...  <-- Đảm bảo dòng này đã bị xóa hoặc vô hiệu hóa
+    ```
+
+2.  **Kiểm tra kết nối:**
+    Từ máy **RX Proxy**, chạy lệnh sau để kiểm tra:
+    ```bash
+    ssh -i ~/.ssh/rx_to_server_key user@<IP_SERVER_CUOI> "echo 'Kết nối SSH Key thành công!'"
+    ```
+    Nếu bạn thấy thông báo "Kết nối SSH Key thành công!" mà **không cần nhập mật khẩu**, nghĩa là bạn đã thiết lập thành công. Dịch vụ `rsync` của bạn giờ đã sẵn sàng để hoạt động tự động.
 ---
 ## 📄 License
 
