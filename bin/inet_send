@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+BMC iNET-11A Data diode TX Proxy - Optimized Version
+"""
+import argparse
+import hashlib
+import json
+import logging
+import math
+import os
+import socket
+import time
+import sys
+import struct
+from logging import handlers
+
+# ==============================================================================
+# 1. CẤU HÌNH VÀ BIẾN TOÀN CỤC
+# ==============================================================================
+
+# Cấu hình logging: Chỉ dùng StreamHandler cho đơn giản, systemd sẽ tự động thu thập log
+DIODE_LOGGER = logging.getLogger('INET_TX_PROXY')
+DIODE_LOGGER.setLevel(logging.INFO)
+STDERR_FORMATTER = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s: %(message)s')
+STDERR_HANDLER = logging.StreamHandler(sys.stderr)
+STDERR_HANDLER.setFormatter(STDERR_FORMATTER)
+DIODE_LOGGER.addHandler(STDERR_HANDLER)
+
+# Các hằng số của giao thức
+PKG_TYPE_START = 0
+PKG_TYPE_DATA = 1
+PKG_TYPE_END = 2
+HEADER_FORMAT = '!B16sI' # Dùng cho gói DATA nhị phân
+
+# ==============================================================================
+# 2. CÁC HÀM TIỆN ÍCH
+# ==============================================================================
+
+def calculate_file_md5(filepath: str) -> str:
+    """Tính toán mã hash MD5 của một file."""
+    md5_hash = hashlib.md5()
+    try:
+        with open(filepath, "rb") as f:
+            # Đọc và cập nhật hash theo từng khối 8KB để tối ưu
+            for byte_block in iter(lambda: f.read(8192), b""):
+                md5_hash.update(byte_block)
+        return md5_hash.hexdigest()
+    except FileNotFoundError:
+        DIODE_LOGGER.error(f"File not found for MD5 calculation: {filepath}")
+        return None
+
+def is_file_stable(filepath: str, delay: int) -> bool:
+    """Kiểm tra xem kích thước file có ổn định sau một khoảng thời gian chờ."""
+    try:
+        initial_size = os.path.getsize(filepath)
+        time.sleep(delay)
+        # Kiểm tra lại file có còn tồn tại và kích thước không đổi
+        return os.path.exists(filepath) and os.path.getsize(filepath) == initial_size
+    except FileNotFoundError:
+        return False
+
+# ==============================================================================
+# 3. CÁC HÀM GỬI GÓI TIN
+# ==============================================================================
+
+def send_start_packet(sock, target_ip, target_port, rel_path, file_md5, filesize, resend_count):
+    """Gửi gói tin START (dạng JSON)."""
+    DIODE_LOGGER.info(f"Sending START for '{rel_path}' | Size: {filesize} | MD5: {file_md5}")
+    start_packet = json.dumps({
+        'p': rel_path,
+        's': filesize,
+        't': PKG_TYPE_START,
+        'h': file_md5  # 'h' là MD5 của file, để bên nhận xác thực
+    }).encode()
+    for _ in range(resend_count):
+        sock.sendto(start_packet, (target_ip, target_port))
+        time.sleep(0.01) # Nghỉ ngắn giữa các lần gửi lại để tránh burst
+
+def send_data_packet(sock, target_ip, target_port, file_md5_bytes, chunk, count, delay_cycles):
+    """Gửi gói tin DATA (dạng nhị phân)."""
+    header = struct.pack(HEADER_FORMAT, PKG_TYPE_DATA, file_md5_bytes, count)
+    binary_packet = header + chunk
+    sock.sendto(binary_packet, (target_ip, target_port))
+    # Dùng vòng lặp pass thay cho busy_wait để giảm tải CPU một chút
+    for _ in range(delay_cycles):
+        pass
+
+def send_end_packet(sock, target_ip, target_port, rel_path, file_md5, count, resend_count):
+    """Gửi gói tin END (dạng JSON)."""
+    DIODE_LOGGER.info(f"Sending END for '{rel_path}' | Total chunks: {count}")
+    end_packet = json.dumps({
+        "p": rel_path,
+        't': PKG_TYPE_END,
+        'c': count,
+        'h': file_md5 # Thêm MD5 vào gói END để bên nhận xác thực
+    }).encode()
+    for _ in range(resend_count):
+        sock.sendto(end_packet, (target_ip, target_port))
+        time.sleep(0.01)
+
+# ==============================================================================
+# 4. HÀM GỬI FILE CHÍNH
+# ==============================================================================
+
+def send_file(sock, config, filepath: str):
+    """
+    Thực hiện toàn bộ quá trình gửi một file, từ START, DATA, đến END.
+    """
+    rel_path = os.path.relpath(filepath, config['SOURCE_DIR'])
+    DIODE_LOGGER.info(f"Processing file: {rel_path}")
+
+    # Tính toán các thông số cần thiết
+    file_md5 = calculate_file_md5(filepath)
+    if not file_md5:
+        return
+    file_md5_bytes = bytes.fromhex(file_md5)
+    filesize = os.path.getsize(filepath)
+
+    # Gửi gói START
+    send_start_packet(
+        sock, config['TARGET_IP'], config['TARGET_PORT'],
+        rel_path, file_md5, filesize, config['RESEND_PACKET']
+    )
+
+    # Gửi các gói DATA
+    count = 0
+    try:
+        with open(filepath, 'rb') as f:
+            while True:
+                chunk = f.read(config['CHUNK_SIZE'])
+                if not chunk:
+                    break
+                send_data_packet(
+                    sock, config['TARGET_IP'], config['TARGET_PORT'],
+                    file_md5_bytes, chunk, count, config['DELAY_NEXT_CHUNK']
+                )
+                count += 1
+    except Exception as e:
+        DIODE_LOGGER.error(f"Error reading file {filepath} during transfer: {e}")
+        return # Hủy bỏ nếu không đọc được file
+    
+    # Gửi gói END
+    send_end_packet(
+        sock, config['TARGET_IP'], config['TARGET_PORT'],
+        rel_path, file_md5, count, config['RESEND_PACKET']
+    )
+    
+    # Xóa file sau khi gửi thành công
+    try:
+        os.remove(filepath)
+        DIODE_LOGGER.info(f"Finished and removed source file: {rel_path}")
+    except OSError as e:
+        DIODE_LOGGER.error(f"Could not remove file {filepath}: {e}")
+
+# ==============================================================================
+# 5. HÀM MAIN ĐỂ KHỞI TẠO VÀ CHẠY
+# ==============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description='Diode Send Daemon')
+    parser.add_argument('--target-subnet', type=str, default="10.10.2.3")
+    parser.add_argument('--target-port', type=int, default=9009)
+    parser.add_argument('--directory', type=str, required=True, help='Directory to watch for files to send')
+    args = parser.parse_args()
+
+    # Tạo một dictionary cấu hình để dễ dàng quản lý và truyền đi
+    config = {
+        'TARGET_IP': args.target_subnet,
+        'TARGET_PORT': args.target_port,
+        'SOURCE_DIR': args.directory,
+        'CHUNK_SIZE': 8900,
+        'DELAY_NEXT_CHUNK': 1000,      # Giảm mạnh, sẵn sàng để tinh chỉnh về 0
+        'RESEND_PACKET': 1,           # Đặt giá trị tin cậy để chống mất gói START/END
+        'SCAN_INTERVAL': 0.5,         # Giảm thời gian quét giữa các chu kỳ
+        'STABILITY_CHECK_DELAY': 1
+    }
+
+    # Tạo socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    DIODE_LOGGER.info(f"Watching for new files in: {config['SOURCE_DIR']}")
+    
+    try:
+        while True:
+            # Quét tìm file
+            # Sắp xếp để xử lý các file cũ hơn trước
+            try:
+                files_to_send = sorted(
+                    [os.path.join(p, f) for p, _, fs in os.walk(config['SOURCE_DIR']) for f in fs],
+                    key=os.path.getmtime
+                )
+            except FileNotFoundError:
+                DIODE_LOGGER.warning(f"Source directory {config['SOURCE_DIR']} not found. Retrying...")
+                time.sleep(5)
+                continue
+
+            if not files_to_send:
+                time.sleep(config['SCAN_INTERVAL'])
+                continue
+
+            for full_path in files_to_send:
+                if is_file_stable(full_path, config['STABILITY_CHECK_DELAY']):
+                    send_file(sock, config, full_path)
+                    # Thêm một khoảng nghỉ ngắn giữa các file để tránh race condition
+                    time.sleep(0.2) 
+                else:
+                    DIODE_LOGGER.info(f"File {full_path} is not stable yet. Skipping for now.")
+
+    except KeyboardInterrupt:
+        DIODE_LOGGER.info("Shutdown signal received.")
+    finally:
+        sock.close()
+
+if __name__ == "__main__":
+    main()

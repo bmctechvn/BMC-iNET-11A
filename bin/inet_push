@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+import configparser
+import logging
+import os
+import subprocess
+import time
+import sys
+from inotify.adapters import Inotify
+
+# Cấu hình logging
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s',
+                    stream=sys.stdout)
+
+CONFIG_FILE = './etc/config/uploader.conf'
+
+def load_config():
+    """Đọc file cấu hình và trả về đối tượng config."""
+    if not os.path.exists(CONFIG_FILE):
+        logging.error(f"File cấu hình không tồn tại: {CONFIG_FILE}")
+        sys.exit(1)
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE)
+    return config
+
+def run_sync(config):
+    """Xây dựng và chạy lệnh rsync, sau đó xóa file nguồn."""
+    sftp_config = config['SFTP']
+    paths_config = config['Paths']
+    password = sftp_config.get('Password')
+    if not password:
+        logging.error("Không tìm thấy mật khẩu trong file cấu hình cho rsync.")
+        return    
+    local_dir = paths_config.get('Local_Dir')
+    # Đảm bảo thư mục nguồn có dấu / ở cuối để rsync hiểu là copy nội dung
+    if not local_dir.endswith('/'):
+        local_dir += '/'
+
+    # Lệnh rsync với tùy chọn --remove-source-files
+    rsync_command = [        
+        'sshpass',
+        '-p', password,
+        'rsync',
+        '-avz',  # archive, verbose, compress
+        '--remove-source-files', # Xóa file ở nguồn sau khi truyền thành công
+        '-e', f"ssh -o StrictHostKeyChecking=no",
+        local_dir,
+        f"{sftp_config.get('User')}@{sftp_config.get('Host')}:{paths_config.get('Remote_Dir')}"
+    ]
+
+    logging.info("Bắt đầu đồng bộ hóa và dọn dẹp...")
+    logging.info(f"Lệnh sẽ chạy: {' '.join(rsync_command)}")
+
+    try:
+        # Chạy lệnh rsync như một tiến trình con
+        result = subprocess.run(rsync_command, check=True, capture_output=True, text=True)
+        logging.info("Đồng bộ hóa và dọn dẹp thành công.")
+        logging.debug("Rsync STDOUT:\n" + result.stdout)
+    except subprocess.CalledProcessError as e:
+        logging.error("Lỗi khi chạy rsync!")
+        logging.error("Exit Code: %s", e.returncode)
+        logging.error("STDOUT:\n%s", e.stdout)
+        logging.error("STDERR:\n%s", e.stderr)
+    except FileNotFoundError:
+        logging.error("Lỗi: Lệnh 'rsync' không tồn tại. Hãy chắc chắn nó đã được cài đặt.")
+
+def main():
+    """Vòng lặp chính để theo dõi thư mục."""
+    config = load_config()
+    watch_dir = config['Paths'].get('Local_Dir')
+
+    os.makedirs(watch_dir, exist_ok=True)
+
+    notifier = Inotify()
+    notifier.add_watch(watch_dir)
+
+    logging.info(f"Bắt đầu theo dõi thư mục: {watch_dir}")
+
+    # Debounce: Cờ để kiểm soát việc chạy rsync
+    sync_needed = False
+    last_event_time = time.time()
+
+    # Xử lý các file có sẵn khi khởi động
+    if os.listdir(watch_dir):
+         logging.info("Phát hiện file có sẵn khi khởi động. Bắt đầu đồng bộ...")
+         run_sync(config)
+
+    while True:
+        for event in notifier.event_gen(yield_nones=False, timeout_s=1):
+            (_, type_names, path, filename) = event
+            # Bất kỳ sự kiện nào cũng sẽ kích hoạt đồng bộ
+            if filename:
+                logging.info(f"Phát hiện thay đổi: {type_names} trên file '{filename}'")
+                sync_needed = True
+                last_event_time = time.time()
+
+        # Debounce logic: Nếu có sự kiện và đã qua 5s không có sự kiện mới
+        if sync_needed and (time.time() - last_event_time > 5):
+            run_sync(config)
+            sync_needed = False # Đặt lại cờ
+
+if __name__ == '__main__':
+    main()
