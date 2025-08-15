@@ -1,7 +1,8 @@
 [Unit]
 Description=BMC iNET push to Server
-After=network-online.target
-Wants=network-online.target
+# Thêm dependency mới để đảm bảo filesystem và mạng đều sẵn sàng
+Requires=network-online.target local-fs.target
+After=network-online.target local-fs.target
 
 [Service]
 Type=simple

@@ -14,6 +14,7 @@ import sys
 import struct
 import sqlite3
 from logging import handlers
+import subprocess
 
 # ==============================================================================
 # 1. CẤU HÌNH VÀ BIẾN TOÀN CỤC
@@ -96,13 +97,41 @@ def calculate_file_md5(filepath: str) -> str:
         return None
 
 def is_file_stable(filepath: str, delay: int) -> bool:
-    """Kiểm tra xem kích thước file có ổn định sau một khoảng thời gian chờ."""
+    """
+    Kiểm tra file có ổn định không bằng hai bước:
+    1. Kiểm tra nhanh kích thước file sau một khoảng trễ.
+    2. Nếu kích thước ổn định, dùng lsof để kiểm tra xem có tiến trình nào đang giữ file không.
+    """
     try:
+        # Bước 1: Kiểm tra nhanh kích thước file như cũ
         initial_size = os.path.getsize(filepath)
         time.sleep(delay)
-        # Kiểm tra lại file có còn tồn tại và kích thước không đổi
-        return os.path.exists(filepath) and os.path.getsize(filepath) == initial_size
+        
+        # Nếu file đã bị xóa hoặc kích thước thay đổi, coi như không ổn định
+        if not os.path.exists(filepath) or os.path.getsize(filepath) != initial_size:
+            return False
+
+        # Bước 2: Kiểm tra chuyên sâu bằng lsof
+        # Nếu file vẫn ổn định về kích thước, hãy chắc chắn không có tiến trình nào đang mở nó.
+        #DIODE_LOGGER.info(f"File '{os.path.basename(filepath)}' is size-stable. Checking for open file handles with lsof...")
+        
+        # Chạy lệnh lsof và bắt output
+        result = subprocess.run(['lsof', '-t', filepath], capture_output=True, text=True)
+        
+        # Nếu result.stdout rỗng, nghĩa là không có tiến trình nào đang mở file -> file đã sẵn sàng
+        if not result.stdout.strip():
+            #DIODE_LOGGER.info(f"No process is holding '{os.path.basename(filepath)}'. File is ready.")
+            return True
+        else:
+            # Nếu có output, nghĩa là file vẫn đang được smbd hoặc tiến trình khác sử dụng
+            pids = ", ".join(result.stdout.strip().split('\n'))
+            #DIODE_LOGGER.info(f"File '{os.path.basename(filepath)}' is still held by process(es) with PID(s): {pids}. Waiting...")
+            return False
+
     except FileNotFoundError:
+        return False
+    except Exception as e:
+        DIODE_LOGGER.error(f"An error occurred in is_file_stable: {e}")
         return False
 
 # ==============================================================================

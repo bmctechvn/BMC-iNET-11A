@@ -1,11 +1,12 @@
 [Unit]
 Description=Load static ARP entries from /etc/ethers
-# Chạy sau khi mạng đã được cấu hình
-After=network.target
+# Yêu cầu dịch vụ này chạy SAU KHI mạng đã thực sự online
+After=network-online.target
+# Kéo theo (muốn có) network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Lệnh arp -f sẽ đọc và áp dụng tất cả các entry trong file /etc/ethers
 ExecStart=/sbin/arp -f /etc/ethers
 RemainAfterExit=yes
 

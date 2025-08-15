@@ -210,7 +210,7 @@ class DiskWriterThread(mp.Process):
         #DIODE_LOGGER.info(f"Finished receiving {self.current_transfer.file_path}. Validating...")
         
         if self._is_file_valid(packet):
-            #DIODE_LOGGER.info(f"File '{self.current_transfer.file_path}' is valid. Moving to outgoing queue.")
+            DIODE_LOGGER.info(f"File '{self.current_transfer.file_path}' is valid. Moving to outgoing queue.")
             try:
                 dest_path = os.path.join(self.server_dir, self.current_transfer.file_path)
                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)
@@ -280,7 +280,7 @@ class DiskWriterThread(mp.Process):
 
 def main():
     parser = argparse.ArgumentParser(description='Diode Receive Daemon')
-    parser.add_argument('--bind-subnet', type=str, default="0.0.0.0")
+    parser.add_argument('--bind-subnet', type=str, default="10.10.2.3")
     parser.add_argument('--bind-port', type=int, default=9009)
     parser.add_argument('--directory', type=str, required=True, help='Temporary directory to receive files')
     parser.add_argument('--server-directory', type=str, required=True, help='Directory to move completed files')
