@@ -1,0 +1,11 @@
+[Unit]
+Description=Diode UDP TX Forwarder (UDP Port 1234)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/socat UDP4-LISTEN:1234,fork UDP4-DATAGRAM:10.10.2.3:1001
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

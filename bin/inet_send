@@ -185,7 +185,7 @@ def send_file(sock, config, filepath: str):
     DIODE_LOGGER.info(f"Processing file: {rel_path}")
     # --- BƯỚC 1: Bắt đầu đo thời gian và ghi log START ---
     start_time = time.time()
-    filesize = os.path.getsize(filepath)
+    #filesize = os.path.getsize(filepath)
 
     # Tính toán các thông số cần thiết
     file_md5 = calculate_file_md5(filepath)
@@ -253,7 +253,7 @@ def main():
         'TARGET_PORT': args.target_port,
         'SOURCE_DIR': args.directory,
         'CHUNK_SIZE': 8900,
-        'DELAY_NEXT_CHUNK': 1000,      # Giảm mạnh, sẵn sàng để tinh chỉnh về 0
+        'DELAY_NEXT_CHUNK': 900,      # Giảm mạnh, sẵn sàng để tinh chỉnh về 0
         'RESEND_PACKET': 1,           # Đặt giá trị tin cậy để chống mất gói START/END
         'SCAN_INTERVAL': 0.5,         # Giảm thời gian quét giữa các chu kỳ
         'STABILITY_CHECK_DELAY': 1

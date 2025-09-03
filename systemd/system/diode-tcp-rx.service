@@ -1,0 +1,13 @@
+[Unit]
+Description=Data transmitting daemon for data diode
+After=multi-user.target
+
+[Service]
+Type=idle
+ExecStart=/home/bmc/core/data-diode/bin/inet_tcp_rx
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

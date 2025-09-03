@@ -56,6 +56,8 @@ class ReceiveState:
         self.known_chunks = set()
         self.full_path = os.path.join(output_dir, self.file_path)
         self.file_handle = None
+        self.start_time = None        
+        self.finish_time = None
 
 def calculate_file_md5(filepath: str) -> str:
     """Tính toán mã hash MD5 của một file."""
@@ -177,9 +179,10 @@ class DiskWriterThread(mp.Process):
             file_path=packet['p'],
             file_md5=packet.get('h'), # Giả định 'h' là md5 của file
             file_size=packet['s'],
-            output_dir=self.output_dir
+            output_dir=self.output_dir,
+           
         )
-        
+        self.current_transfer.start_time = time.time()
         os.makedirs(os.path.dirname(self.current_transfer.full_path), exist_ok=True)
         try:
             if os.path.exists(self.current_transfer.full_path):
@@ -207,10 +210,11 @@ class DiskWriterThread(mp.Process):
 
     def _handle_end(self, packet: dict):
         """Xử lý khi kết thúc một file."""
-        #DIODE_LOGGER.info(f"Finished receiving {self.current_transfer.file_path}. Validating...")
-        
+        #DIODE_LOGGER.info(f"Finished receiving {self.current_transfer.file_path}. Validating...")    
         if self._is_file_valid(packet):
-            DIODE_LOGGER.info(f"File '{self.current_transfer.file_path}' is valid. Moving to outgoing queue.")
+            self.current_transfer.finish_time = time.time()
+            _process_time = self.current_transfer.finish_time - self.current_transfer.start_time
+            DIODE_LOGGER.info(f"File '{self.current_transfer.file_path}' is valid. Speed (Mb): {self.current_transfer.file_size*0.000008 / (_process_time)}")
             try:
                 dest_path = os.path.join(self.server_dir, self.current_transfer.file_path)
                 os.makedirs(os.path.dirname(dest_path), exist_ok=True)

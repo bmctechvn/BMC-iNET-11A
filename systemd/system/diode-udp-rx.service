@@ -1,0 +1,11 @@
+[Unit]
+Description=Diode ID RX Forwarder (UDP Port 1234)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/socat UDP4-LISTEN:1001,fork UDP4-DATAGRAM:192.168.2.22:1234
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

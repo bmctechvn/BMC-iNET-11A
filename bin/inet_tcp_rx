@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""
+TCP Stream Gateway for Data Diode - RX Proxy (Optimized)
+Receives TCP streams encapsulated in a custom UDP protocol and forwards them.
+"""
+import argparse
+import json
+import logging
+import os
+import socket
+import sys
+import traceback
+import struct
+import multiprocessing as mp
+import queue
+import time
+from logging import handlers
+
+# ==============================================================================
+# 1. CẤU HÌNH VÀ BIẾN TOÀN CỤC
+# ==============================================================================
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s: %(message)s',
+                    stream=sys.stdout)
+LOGGER = logging.getLogger('TCP_GATEWAY_RX')
+
+# Hàng đợi (Queue) an toàn giữa các tiến trình
+DATA_QUEUE = mp.Queue(maxsize=200000)
+
+# Các hằng số của giao thức
+PKG_TYPE_START = 0
+PKG_TYPE_DATA = 1
+PKG_TYPE_END = 2
+HEADER_FORMAT = '!B16sI'
+HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+
+# ==============================================================================
+# 2. CÁC LỚP TIỆN ÍCH
+# ==============================================================================
+
+class TCPConnectionState:
+    """Lớp dữ liệu để theo dõi trạng thái của một luồng TCP đang chuyển tiếp."""
+    def __init__(self, stream_id: str, stream_hash: str, target_socket: socket.socket):
+        self.stream_id = stream_id
+        self.stream_hash = stream_hash
+        self.target_socket = target_socket
+        self.packets_received = 0
+        self.bytes_forwarded = 0
+        self.start_time = time.monotonic()
+
+# ==============================================================================
+# 3. TIẾN TRÌNH NHẬN MẠNG (PRODUCER)
+# ==============================================================================
+
+class NetworkProcess(mp.Process):
+    """Tiến trình này chỉ nhận gói tin UDP từ mạng và đưa vào hàng đợi."""
+    def __init__(self, sock, data_queue):
+        super().__init__()
+        self.sock = sock
+        self.data_queue = data_queue
+        self.running = mp.Value('b', True)
+
+    def run(self):
+        LOGGER.info("NetworkProcess started. Listening for packets...")
+        packets_dropped = 0
+        while self.running.value:
+            try:
+                data, _ = self.sock.recvfrom(9000) # Sẵn sàng cho Jumbo Frames
+                if data:
+                    try:
+                        self.data_queue.put_nowait(data)
+                    except queue.Full:
+                        packets_dropped += 1
+                        if packets_dropped % 1000 == 1:
+                            LOGGER.warning(f"DATA_QUEUE is full. Dropping packets...")
+            except socket.timeout:
+                continue
+            except Exception as e:
+                LOGGER.error(f"NetworkProcess error: {e}")
+
+    def stop(self):
+        self.running.value = False
+
+# ==============================================================================
+# 4. TIẾN TRÌNH XỬ LÝ VÀ CHUYỂN TIẾP (CONSUMER)
+# ==============================================================================
+
+class TCPForwarderProcess(mp.Process):
+    """Tiến trình này lấy dữ liệu từ hàng đợi và chuyển tiếp qua TCP."""
+    def __init__(self, data_queue):
+        super().__init__()
+        self.data_queue = data_queue
+        self.running = mp.Value('b', True)
+        self.active_connections = {} # Dictionary để quản lý nhiều luồng TCP cùng lúc
+
+    def run(self):
+        LOGGER.info("TCPForwarderProcess started. Waiting for data...")
+        while self.running.value:
+            try:
+                data = self.data_queue.get(timeout=1)
+                self._process_packet(data)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                LOGGER.error(f"TCPForwarderProcess error: {e}")
+                traceback.print_exc()
+
+    def _process_packet(self, data: bytes):
+        """Phân loại và xử lý gói tin."""
+        if not data: return
+
+        if data[0] == 123: # Gói JSON (START/END)
+            try:
+                packet = json.loads(data.decode())
+                pkt_type = packet.get("t")
+                stream_hash = packet.get("h")
+                if not stream_hash: return
+
+                if pkt_type == PKG_TYPE_START:
+                    self._handle_start(packet)
+                elif pkt_type == PKG_TYPE_END and stream_hash in self.active_connections:
+                    self._handle_end(stream_hash, packet)
+            except (json.JSONDecodeError, KeyError):
+                LOGGER.warning("Received malformed JSON. Ignoring.")
+        else: # Gói Binary (DATA)
+            try:
+                header = data[:HEADER_SIZE]
+                payload = data[HEADER_SIZE:]
+                _, hash_bytes, _ = struct.unpack(HEADER_FORMAT, header)
+                stream_hash = hash_bytes.hex()
+                
+                if stream_hash in self.active_connections:
+                    self._handle_data(stream_hash, payload)
+            except struct.error:
+                LOGGER.warning("Malformed binary packet received. Ignoring.")
+
+    def _handle_start(self, packet: dict):
+        """Xử lý khi bắt đầu một luồng TCP mới."""
+        stream_id = packet.get('p')
+        stream_hash = packet.get('h')
+        stream_target = packet.get("stream_target")
+
+        if not all([stream_id, stream_hash, stream_target]):
+            LOGGER.warning(f"Invalid START packet received: {packet}")
+            return
+            
+        if stream_hash in self.active_connections:
+            LOGGER.warning(f"Received START for an already active stream {stream_id}. Resetting old one.")
+            self._close_connection(stream_hash)
+
+        try:
+            target_ip, target_port_str = stream_target.split(':')
+            target_port = int(target_port_str)
+            
+            LOGGER.info(f"[{stream_id}] Opening new TCP connection to final server {target_ip}:{target_port}")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((target_ip, target_port))
+            
+            state = TCPConnectionState(stream_id, stream_hash, sock)
+            self.active_connections[stream_hash] = state
+        except Exception as e:
+            LOGGER.error(f"[{stream_id}] Failed to connect to final TCP server {stream_target}: {e}")
+
+    def _handle_data(self, stream_hash: str, payload: bytes):
+        """Chuyển tiếp một chunk dữ liệu."""
+        state = self.active_connections[stream_hash]
+        try:
+            state.target_socket.sendall(payload)
+            state.packets_received += 1
+            state.bytes_forwarded += len(payload)
+        except socket.error as e:
+            LOGGER.error(f"[{state.stream_id}] Socket error while forwarding data: {e}. Closing connection.")
+            self._close_connection(stream_hash)
+
+    def _handle_end(self, stream_hash: str, packet: dict):
+        """Xử lý khi kết thúc một luồng TCP."""
+        state = self.active_connections.get(stream_hash)
+        if state:
+            duration = time.monotonic() - state.start_time
+            LOGGER.info(f"[{state.stream_id}] END packet received. "
+                        f"Forwarded {state.bytes_forwarded / 1024:.2f} KB "
+                        f"in {duration:.2f} seconds.")
+            self._close_connection(stream_hash)
+
+    def _close_connection(self, stream_hash: str):
+        """Đóng socket và dọn dẹp trạng thái."""
+        if stream_hash in self.active_connections:
+            state = self.active_connections[stream_hash]
+            if state.target_socket:
+                state.target_socket.close()
+            del self.active_connections[stream_hash]
+            LOGGER.info(f"[{state.stream_id}] Connection closed and state cleaned up.")
+
+    def stop(self):
+        self.running.value = False
+
+# ==============================================================================
+# 5. HÀM MAIN ĐỂ KHỞI TẠO VÀ CHẠY
+# ==============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description='Diode TCP Receive Gateway')
+    parser.add_argument('--bind-subnet', type=str, default="0.0.0.0")
+    parser.add_argument('--bind-port', type=int, default=2002) # Cổng UDP nhận từ TX Proxy
+    args = parser.parse_args()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((args.bind_subnet, args.bind_port))
+    sock.settimeout(1.0) 
+
+    # Khởi tạo và chạy các tiến trình
+    network_process = NetworkProcess(sock, DATA_QUEUE)
+    forwarder_process = TCPForwarderProcess(DATA_QUEUE)
+    
+    processes = [network_process, forwarder_process]
+
+    try:
+        for p in processes: p.start()
+        for p in processes: p.join()
+    except KeyboardInterrupt:
+        LOGGER.info("Shutdown signal received. Stopping processes.")
+        for p in processes:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=2)
+
+if __name__ == "__main__":
+    main()

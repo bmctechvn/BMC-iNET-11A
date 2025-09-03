@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+import socketserver
+import socket
+import struct
+import json
+import hashlib
+import time
+import logging
+import sys
+import uuid
+
+# ==============================================================================
+# CẤU HÌNH
+# ==============================================================================
+LISTEN_HOST = "0.0.0.0"
+LISTEN_PORT = 8888 # Cổng TCP để client kết nối vào
+
+# Thông tin của RX Proxy
+DIODE_TARGET_IP = "10.10.2.3"
+DIODE_TARGET_PORT = 2002
+
+# Thông tin của Server Đích cuối cùng
+FINAL_SERVER_IP = "192.168.2.72" # IP của Server cuối
+FINAL_SERVER_PORT = 8888 # Cổng của Server cuối
+
+# Thêm độ trễ ngắn (tính bằng số vòng lặp CPU) để tránh bão gói tin
+DELAY_NEXT_CHUNK = 200 # <-- TỐI ƯU 1: Thêm độ trễ có thể tinh chỉnh
+
+# Các hằng số giao thức (phải khớp với cả hai bên)
+PKG_TYPE_START = 0
+PKG_TYPE_DATA = 1
+PKG_TYPE_END = 2
+HEADER_FORMAT = '!B16sI'
+CHUNK_SIZE = 8900 # Tăng CHUNK_SIZE nếu bạn đang dùng Jumbo Frames
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s - %(name)s - %(levelname)s: %(message)s',
+                    stream=sys.stdout)
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# ==============================================================================
+# CÁC HÀM GỬI GÓI TIN (Tương tự inet-send.py)
+# ==============================================================================
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def send_start_packet(stream_id, stream_md5):
+    """Gửi gói START cho một luồng TCP."""
+    logging.info(f"Starting new TCP stream session: {stream_id}")
+    start_packet = json.dumps({
+        'p': stream_id,
+        's': -1,  # Dùng -1 để báo hiệu đây là một luồng (stream), không phải file
+        't': PKG_TYPE_START,
+        'h': stream_md5,
+        # Thêm thông tin về đích đến để RX Proxy biết cần kết nối tới đâu
+        'stream_target': f"{FINAL_SERVER_IP}:{FINAL_SERVER_PORT}"
+    }).encode()
+    for _ in range(3): # Gửi 3 lần để đảm bảo nhận được
+        sock.sendto(start_packet, (DIODE_TARGET_IP, DIODE_TARGET_PORT))
+        time.sleep(0.01)
+
+def send_data_packet(stream_md5_bytes, chunk, count):
+    """Gửi gói DATA nhị phân."""
+    header = struct.pack(HEADER_FORMAT, PKG_TYPE_DATA, stream_md5_bytes, count)
+    binary_packet = header + chunk
+    sock.sendto(binary_packet, (DIODE_TARGET_IP, DIODE_TARGET_PORT))
+
+def send_end_packet(stream_id, stream_md5, count):
+    """Gửi gói END cho một luồng TCP."""
+    logging.info(f"Ending TCP stream session: {stream_id}")
+    end_packet = json.dumps({
+        'p': stream_id,
+        't': PKG_TYPE_END,
+        'c': count,
+        'h': stream_md5
+    }).encode()
+    for _ in range(3): # Gửi 3 lần để đảm bảo nhận được
+        sock.sendto(end_packet, (DIODE_TARGET_IP, DIODE_TARGET_PORT))
+        time.sleep(0.01)
+
+# ==============================================================================
+# TCP SERVER HANDLER
+# ==============================================================================
+class TCPStreamHandler(socketserver.BaseRequestHandler):
+    """
+    Handler được tạo ra cho mỗi kết nối TCP từ client.
+    """
+    def handle(self):
+        client_ip, client_port = self.client_address
+        logging.info(f"Accepted TCP connection from {client_ip}:{client_port}")
+
+        # TỐI ƯU 2: Dùng UUID để tạo định danh và hash an toàn, hiệu quả hơn
+        stream_uuid = uuid.uuid4()
+        # Dùng 16 bytes đầu của UUID làm hash (khớp với 16s trong struct)
+        stream_hash_bytes = stream_uuid.bytes
+        stream_hash_hex = stream_uuid.hex
+        stream_id = f"tcp_stream_{stream_uuid}"
+        
+        # Gửi gói START để báo cho RX Proxy chuẩn bị
+        send_start_packet(stream_id, stream_hash_hex)
+        
+        count = 0
+        try:
+            while True:
+                data = self.request.recv(CHUNK_SIZE)
+                if not data:
+                    break
+                
+                # Gửi dữ liệu vừa đọc được qua Diode
+                send_data_packet(stream_hash_bytes, data, count)
+                count += 1
+        except Exception as e:
+            logging.error(f"Error during TCP stream from {client_ip}:{client_port}: {e}")
+        finally:
+            # Gửi gói END để báo cho RX Proxy kết thúc
+            send_end_packet(stream_id, stream_hash_hex, count)
+            logging.info(f"Closed TCP connection from {client_ip}:{client_port}")
+
+# ==============================================================================
+# HÀM MAIN
+# ==============================================================================
+if __name__ == "__main__":
+    server = socketserver.ThreadingTCPServer((LISTEN_HOST, LISTEN_PORT), TCPStreamHandler)
+    logging.info(f"TCP to Diode gateway listening on {LISTEN_HOST}:{LISTEN_PORT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logging.info("Shutting down the server.")
+        server.shutdown()
